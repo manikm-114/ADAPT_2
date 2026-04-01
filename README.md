@@ -28,18 +28,7 @@ This repository contains the ADAPT simulation code, scenario configurations, fig
 - references.bib
   Bibliography file, if present.
 
-## Not intended for GitHub upload
 
-The following are generated or temporary and should not be committed:
-
-- outputs/
-- simulator_web/_generated/
-- simulator_web/_jobs/
-- simulator_web/_runs/
-- __pycache__/
-- *.pyc
-- *.bak
-- scripts/Old/
 
 ## Requirements
 
