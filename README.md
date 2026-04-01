@@ -19,15 +19,6 @@ This repository contains the ADAPT simulation code, scenario configurations, fig
 - paper_assets/
   Paper-ready figures and tables.
 
-- paper/
-  Supporting paper notes and assets, if present.
-
-- top-level .tex files
-  Main manuscript source files.
-
-- references.bib
-  Bibliography file, if present.
-
 
 
 ## Requirements
@@ -160,14 +151,5 @@ python scripts/make_fig8_from_run.py --run_dir outputs/runs/<your_run_dir> --out
 
 ## Notes
 
-- Generated outputs from the webpage are local and should not be committed.
 - If uvicorn is missing, install dependencies again with the requirements file.
 - On some systems, python may not point to the expected interpreter. In that case use python3 or py, depending on your platform.
-
-## Suggested Git steps
-
-After checking the contents of this folder:
-
-git init
-git add .
-git commit -m "Initial clean ADAPT reproducibility repo"
