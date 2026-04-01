@@ -1,0 +1,492 @@
+﻿from __future__ import annotations
+
+from pathlib import Path
+from typing import Dict, Any, List, Tuple
+import json
+
+import numpy as np
+import pandas as pd
+import yaml
+
+from adapt.core.types import Manuscript, Reviewer, Review, Policy, State, Decision
+from adapt.core.rng import seed_all
+from adapt.core.logging import EventLogger
+from adapt.mechanisms.triage import triage_select
+from adapt.mechanisms.governance import adapt_policy
+
+
+
+
+def in_window(t: int, start_t: int, end_t: int) -> bool:
+    return (t >= start_t) and (t <= end_t)
+
+
+def get_scenario_overrides(cfg: Dict[str, Any], t: int) -> Dict[str, Any]:
+    sc = cfg.get("scenario", {}) or {}
+    out: Dict[str, Any] = {}
+
+    # Submission surge overrides submissions.mean_per_timestep
+    if "submission_surge" in sc:
+        s = sc["submission_surge"]
+        if in_window(t, int(s["start_t"]), int(s["end_t"])):
+            out["mean_per_timestep"] = float(s["mean_per_timestep"])
+
+    # Quality drift overrides submissions.quality_mean
+    if "quality_drift" in sc:
+        s = sc["quality_drift"]
+        if in_window(t, int(s["start_t"]), int(s["end_t"])):
+            out["quality_mean"] = float(s["quality_mean"])
+
+    # Disagreement spike overrides review noise multiplier
+    if "disagreement_spike" in sc:
+        s = sc["disagreement_spike"]
+        if in_window(t, int(s["start_t"]), int(s["end_t"])):
+            out["noise_multiplier"] = float(s.get("noise_multiplier", 1.0))
+
+    return out
+
+
+
+
+
+
+def clamp01(x: float) -> float:
+    return max(0.0, min(1.0, float(x)))
+
+
+def make_reviewers(cfg: Dict[str, Any]) -> List[Reviewer]:
+    n_h = int(cfg["reviewers"]["n_humans"])
+    n_ai = int(cfg["reviewers"]["n_ai"])
+    max_load = int(cfg["reviewers"]["max_load"])
+
+    reviewers: List[Reviewer] = []
+
+    # Humans: moderate reliability distribution
+    for i in range(n_h):
+        reliability = float(np.clip(np.random.normal(0.70, 0.12), 0.2, 0.98))
+        bias = float(np.random.normal(0.0, 0.03))
+        reviewers.append(
+            Reviewer(rid=i, kind="human", reliability=reliability, bias=bias, max_load=max_load)
+        )
+
+    # AI reviewers: higher average reliability but still imperfect
+    for j in range(n_ai):
+        rid = n_h + j
+        reliability = float(np.clip(np.random.normal(0.78, 0.10), 0.2, 0.99))
+        bias = float(np.random.normal(0.0, 0.02))
+        reviewers.append(
+            Reviewer(rid=rid, kind="ai", reliability=reliability, bias=bias, max_load=max_load)
+        )
+
+    return reviewers
+
+
+def sample_submissions(cfg: Dict[str, Any], t: int, state: State, overrides: Dict[str, Any]) -> List[Manuscript]:
+    lam = float(overrides.get("mean_per_timestep", cfg["submissions"]["mean_per_timestep"]))
+    n = int(np.random.poisson(lam=lam))
+
+    q_mu = float(overrides.get("quality_mean", cfg["submissions"]["quality_mean"]))
+    q_sd = float(cfg["submissions"]["quality_std"])
+    c_mu = float(cfg["submissions"]["complexity_mean"])
+    c_sd = float(cfg["submissions"]["complexity_std"])
+
+    out: List[Manuscript] = []
+    for _ in range(n):
+        q = float(np.clip(np.random.normal(q_mu, q_sd), 0.0, 1.0))
+        c = float(np.clip(np.random.normal(c_mu, c_sd), 0.0, 1.0))
+        mid = state.next_mid
+        state.next_mid += 1
+        out.append(Manuscript(mid=mid, t_submitted=t, quality_true=q, complexity=c))
+    return out
+
+
+def choose_reviewers_for_manuscript(cfg: Dict[str, Any], state: State, k: int) -> List[Reviewer]:
+    """
+    Simple baseline assignment:
+    - pick reviewers with available capacity
+    - enforce an AI fraction target if ai_enabled
+    """
+    ai_enabled = bool(cfg["reviewers"]["ai_enabled"])
+    ai_frac = float(state.policy.ai_fraction if state.policy else cfg["review_process"]["ai_fraction_target"])
+
+    available = [r for r in state.reviewers if r.load < r.max_load]
+    if len(available) < k:
+        # if overloaded, allow over-capacity as last resort (bounded later)
+        available = list(state.reviewers)
+
+    humans = [r for r in available if r.kind == "human"]
+    ais = [r for r in available if r.kind == "ai"]
+
+    n_ai = 0
+    if ai_enabled and len(ais) > 0:
+        n_ai = int(round(k * ai_frac))
+        n_ai = max(0, min(n_ai, k, len(ais)))
+
+    n_h = k - n_ai
+    if len(humans) < n_h:
+        # backfill with AI if not enough humans
+        backfill = min(k - len(humans), len(ais))
+        n_h = len(humans)
+        n_ai = min(k - n_h, len(ais), n_ai + backfill)
+
+    chosen: List[Reviewer] = []
+    if n_h > 0:
+        chosen.extend(list(np.random.choice(humans, size=n_h, replace=False)))
+    if n_ai > 0:
+        chosen.extend(list(np.random.choice(ais, size=n_ai, replace=False)))
+
+    # if still short, fill from anyone
+    if len(chosen) < k:
+        pool = [r for r in available if r not in chosen]
+        need = k - len(chosen)
+        if len(pool) >= need:
+            chosen.extend(list(np.random.choice(pool, size=need, replace=False)))
+        else:
+            chosen.extend(pool[:need])
+
+    return chosen
+
+
+def generate_review(cfg: Dict[str, Any], m: Manuscript, r: Reviewer, noise_multiplier: float = 1.0) -> Review:
+    """
+    Score model: noisy observation of true quality + bias.
+    Noise increases with manuscript complexity and decreases with reviewer reliability.
+    Completeness depends on reliability (and mildly on complexity).
+    """
+    base_noise = 0.18 + 0.22 * m.complexity
+    eff_noise = (base_noise * (1.05 - r.reliability)) * float(noise_multiplier)
+
+    raw = m.quality_true + r.bias + float(np.random.normal(0.0, eff_noise))
+    score = clamp01(raw)
+
+    confidence = clamp01(r.reliability - 0.35 * m.complexity + float(np.random.normal(0.0, 0.05)))
+    completeness = clamp01(
+        0.35 + 0.70 * r.reliability - 0.25 * m.complexity + float(np.random.normal(0.0, 0.06))
+    )
+
+    time_cost = float(0.5 + 1.5 * m.complexity + (1.0 - r.reliability))
+    return Review(mid=m.mid, rid=r.rid, score=score, confidence=confidence, completeness=completeness, time_cost=time_cost)
+
+
+def meta_review_signals(reviews: List[Review]) -> Tuple[float, float]:
+    scores = np.array([rv.score for rv in reviews], dtype=float)
+    comps = np.array([rv.completeness for rv in reviews], dtype=float)
+    disagreement = float(np.var(scores)) * 10.0  # scaled for readability
+    completeness = float(np.mean(comps))
+    return disagreement, completeness
+
+
+def decide(cfg: Dict[str, Any], reviews: List[Review]) -> Decision:
+    scores = np.array([rv.score for rv in reviews], dtype=float)
+    mu = float(np.mean(scores))
+    disagreement = float(np.var(scores)) * 10.0
+
+    tau_a = float(cfg["decision"]["accept_threshold"])
+    tau_r = float(cfg["decision"]["reject_threshold"])
+    guard = float(cfg["decision"]["disagreement_guard"])
+
+    if disagreement <= guard and mu >= tau_a:
+        return "ACCEPT"
+    if disagreement <= guard and mu <= tau_r:
+        return "REJECT"
+    return "DELIBERATE"
+
+
+def should_escalate(cfg: Dict[str, Any], disagreement: float, completeness: float, policy: Policy) -> bool:
+    # global ablation override
+    gov = cfg.get("governance", {}) or {}
+    if bool(gov.get("disable_escalation", False)):
+        return False
+
+    # policy-driven enable/disable
+    if not bool(policy.escalation_enabled):
+        return False
+    if disagreement > float(cfg["review_process"]["disagreement_threshold"]):
+        return True
+    if completeness < float(cfg["review_process"]["completeness_threshold"]):
+        return True
+    return False
+
+
+def run(cfg: Dict[str, Any]) -> Path:
+    seed_all(int(cfg["run"]["seed"]))
+
+    out_root = Path(cfg["run"]["out_dir"])
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    from adapt.core.logging import now_tag
+    tag = now_tag()
+    run_name = str(cfg["run"].get("run_name", "run"))
+    run_dir = out_root / f"{tag}_{run_name}"
+    run_dir.mkdir(parents=True, exist_ok=False)
+
+    # write resolved config
+    (run_dir / "config_resolved.yaml").write_text(
+        yaml.safe_dump(cfg, sort_keys=False),
+        encoding="utf-8"
+    )
+
+    logger = EventLogger(run_dir / "events.jsonl")
+
+    state = State()
+    state.reviewers = make_reviewers(cfg)
+    state.policy = Policy(
+        ai_fraction=float(cfg["review_process"]["ai_fraction_target"]),
+        triage_threshold=float(cfg.get("triage", {}).get("threshold", cfg["decision"]["reject_threshold"])),
+        escalation_enabled=bool(cfg["review_process"]["escalation_enabled"]),
+    )
+
+    T = int(cfg["sim"]["T"])
+    rows = []
+
+    # ---- Collusion / capture scenario state (optional) ----
+    sc = cfg.get("scenario", {}) or {}
+    coll = sc.get("collusion_attack", None)
+    collusion_on = coll is not None
+    within_cluster_share = 0.0
+    concentration = 0.0
+    above_counter = 0
+    intervention_active = False
+
+
+    for t in range(T):
+        overrides = get_scenario_overrides(cfg, t)
+        noise_multiplier = float(overrides.get("noise_multiplier", 1.0))
+
+        # ---- Collusion scenario dynamics (optional) ----
+        gov = cfg.get("governance", {}) or {}
+        disable_mitigation = bool(gov.get("disable_capture_mitigation", False))
+        if collusion_on:
+            start_t = int(coll.get("start_t", 6))
+            thr = float(coll.get("threshold", 0.24))
+            patience = int(coll.get("patience", 1))
+            target = float(coll.get("within_cluster_target", 0.28))
+            noise_std = float(coll.get("noise_std", 0.03))
+            mit = float(coll.get("mitigation_strength", 0.35))
+            ema_alpha = float(coll.get("ema_alpha", 0.3))
+            max_share = float(coll.get("max_share", 0.35))
+
+            if t < start_t:
+                within_cluster_share = 0.01 + 0.005 * float(np.random.rand())
+            else:
+                if (not intervention_active) or disable_mitigation:
+                    within_cluster_share = target + noise_std * float(np.random.randn())
+                else:
+                    within_cluster_share = within_cluster_share * (1.0 - mit) + 0.05 * float(np.random.rand())
+
+            within_cluster_share = float(np.clip(within_cluster_share, 0.0, max_share))
+            concentration = float((1.0 - ema_alpha) * concentration + ema_alpha * within_cluster_share)
+
+            if concentration > thr:
+                above_counter += 1
+            else:
+                above_counter = 0
+
+            if (above_counter >= patience) and (not disable_mitigation):
+                intervention_active = True
+
+            logger.log({
+                "type": "collusion_state",
+                "t": t,
+                "within_cluster_share": within_cluster_share,
+                "concentration": concentration,
+                "threshold": thr,
+                "above_counter": above_counter,
+                "intervention_active": bool(intervention_active),
+                "disable_capture_mitigation": bool(disable_mitigation),
+            })
+        else:
+            within_cluster_share = 0.0
+            concentration = 0.0
+            intervention_active = False
+            above_counter = 0
+
+
+        state.t = t
+
+        # 1) submissions
+        new_ms = sample_submissions(cfg, t, state, overrides)
+        state.backlog.extend(new_ms)
+        state.n_submitted += len(new_ms)
+
+        logger.log({"type": "submissions", "t": t, "count": len(new_ms)})
+        if overrides:
+            logger.log({"type": "scenario_overrides", "t": t, **overrides})
+
+
+        # 2) triage + capacity-limited processing (journal pressure)
+        max_reviews = int(cfg.get("capacity", {}).get("max_reviews_per_timestep", 10**9))
+        k = int(cfg["review_process"]["k_reviewers"])
+        max_manuscripts = max(1, max_reviews // k)
+
+        backlog_before = len(state.backlog)
+
+        processed_now, _triage_pairs = triage_select(
+            manuscripts=state.backlog,
+            policy=state.policy,
+            max_to_keep=max_manuscripts,
+        )
+
+        processed_ids = {m.mid for m in processed_now}
+        state.backlog = [m for m in state.backlog if m.mid not in processed_ids]
+
+        backlog_after = len(state.backlog)
+
+        logger.log({
+            "type": "triage",
+            "t": t,
+            "backlog_before": backlog_before,
+            "processed_now": len(processed_now),
+            "backlog_after": backlog_after,
+            "triage_threshold": float(state.policy.triage_threshold),
+            "ai_fraction_policy": float(state.policy.ai_fraction),
+            "escalation_enabled": bool(state.policy.escalation_enabled),
+            "max_reviews": max_reviews,
+            "k_reviewers": k,
+            "max_manuscripts": max_manuscripts,
+        })
+
+        n_decided = 0
+        n_escal = 0
+        total_reviews = 0
+        total_time_cost = 0.0
+
+        disagreements_t: List[float] = []
+
+        for m in processed_now:
+            k = int(cfg["review_process"]["k_reviewers"])
+            all_reviews: List[Review] = []
+            rounds = 0
+            disagreement = 0.0
+            completeness = 0.0
+
+            while True:
+                rounds += 1
+                chosen = choose_reviewers_for_manuscript(cfg, state, k=k)
+                for r in chosen:
+                    r.load += 1
+                    rv = generate_review(cfg, m, r, noise_multiplier=noise_multiplier)
+                    all_reviews.append(rv)
+                    total_reviews += 1
+                    total_time_cost += rv.time_cost
+
+                disagreement, completeness = meta_review_signals(all_reviews)
+
+                if should_escalate(cfg, disagreement, completeness, policy=state.policy) and rounds <= int(cfg["review_process"]["escalation_max_rounds"]):
+                    n_escal += 1
+                    continue
+                break
+
+            disagreements_t.append(float(disagreement))
+
+            d = decide(cfg, all_reviews)
+            state.decided[m.mid] = d
+            n_decided += 1
+
+            if d == "ACCEPT":
+                state.n_accept += 1
+            elif d == "REJECT":
+                state.n_reject += 1
+            else:
+                state.n_deliberate += 1
+
+            logger.log({
+                "type": "decision",
+                "t": t,
+                "mid": m.mid,
+                "decision": d,
+                "n_reviews": len(all_reviews),
+                "rounds": rounds,
+                "disagreement": float(disagreement),
+                "completeness": float(completeness),
+                "quality_true": float(m.quality_true),
+                "complexity": float(m.complexity),
+            })
+
+        mean_disagreement = float(np.mean(disagreements_t)) if disagreements_t else 0.0
+
+        # 3) ADAPT: update policy using system signals (closed-loop)
+        adapt_policy(
+            state=state,
+            cfg=cfg,
+            metrics={
+                "backlog": float(len(state.backlog)),
+                "mean_disagreement": float(mean_disagreement),
+            },
+        )
+
+        logger.log({
+            "type": "policy_update",
+            "t": t,
+            "ai_fraction_policy": float(state.policy.ai_fraction),
+            "triage_threshold": float(state.policy.triage_threshold),
+            "escalation_enabled": bool(state.policy.escalation_enabled),
+            "mean_disagreement": float(mean_disagreement),
+            "backlog": int(len(state.backlog)),
+        })
+
+        # collect reviewer load stats
+        loads = [r.load for r in state.reviewers]
+        mean_load = float(np.mean(loads)) if loads else 0.0
+        max_load = int(np.max(loads)) if loads else 0
+
+        state.n_reviewed += total_reviews
+        state.n_escalations += n_escal
+
+        rows.append({
+            "t": t,
+            "submitted": len(new_ms),
+            "processed": len(processed_now),
+            "decided": n_decided,
+            "reviews": total_reviews,
+            "escalations": n_escal,
+            "mean_disagreement": mean_disagreement,
+            "within_cluster_share": float(within_cluster_share),
+            "concentration": float(concentration),
+            "intervention_active": bool(intervention_active),
+            "accept": state.n_accept,
+            "reject": state.n_reject,
+            "deliberate": state.n_deliberate,
+            "backlog": len(state.backlog),
+            "mean_reviewer_load": mean_load,
+            "max_reviewer_load": max_load,
+            "total_time_cost": total_time_cost,
+            "ai_fraction_policy": float(state.policy.ai_fraction),
+            "triage_threshold": float(state.policy.triage_threshold),
+            "escalation_enabled": bool(state.policy.escalation_enabled),
+            "max_reviews_per_timestep": int(cfg.get("capacity", {}).get("max_reviews_per_timestep", 10**9)),
+        })
+
+    # Write metrics
+    df = pd.DataFrame(rows)
+    df.to_csv(run_dir / "metrics.csv", index=False)
+
+    # Write summary
+    summary = {
+        "T": T,
+        "max_concentration": float(df["concentration"].max()) if "concentration" in df.columns and len(df) else None,
+        "final_concentration": float(df["concentration"].iloc[-1]) if "concentration" in df.columns and len(df) else None,
+        "t_intervention_first": (int(df.index[df["intervention_active"].astype(str).str.lower().eq("true")][0]) if "intervention_active" in df.columns and df["intervention_active"].astype(str).str.lower().eq("true").any() else None),
+        "n_submitted": state.n_submitted,
+        "n_decided": len(state.decided),
+        "n_reviews": state.n_reviewed,
+        "n_escalations": state.n_escalations,
+        "n_accept": state.n_accept,
+        "n_reject": state.n_reject,
+        "n_deliberate": state.n_deliberate,
+        "final_backlog": int(df["backlog"].iloc[-1]) if len(df) else 0,
+        "final_mean_reviewer_load": float(df["mean_reviewer_load"].iloc[-1]) if len(df) else 0.0,
+        "final_max_reviewer_load": int(df["max_reviewer_load"].iloc[-1]) if len(df) else 0,
+        "final_ai_fraction_policy": float(df["ai_fraction_policy"].iloc[-1]) if len(df) else None,
+        "final_triage_threshold": float(df["triage_threshold"].iloc[-1]) if len(df) else None,
+        "final_escalation_enabled": bool(df["escalation_enabled"].iloc[-1]) if len(df) else None,
+    }
+    (run_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+
+    logger.close()
+    return run_dir
+
+
+def load_yaml(path: str | Path) -> Dict[str, Any]:
+    p = Path(path)
+    return yaml.safe_load(p.read_text(encoding="utf-8"))

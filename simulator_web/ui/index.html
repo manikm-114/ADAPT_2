@@ -1,0 +1,83 @@
+﻿<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>ADAPT Simulator Interface</title>
+  <link rel="stylesheet" href="/ui/styles.css" />
+  <script defer src="/ui/app.js"></script>
+</head>
+<body>
+  <div class="wrap">
+    <h1>ADAPT Simulator Interface</h1>
+
+    <div class="panel">
+      <h2>Model overview</h2>
+      <div class="overviewGrid">
+        <div>
+          <h3>Agents</h3>
+          <ul id="agentsList"></ul>
+        </div>
+        <div>
+          <h3>Paper variables</h3>
+          <ul id="paperVarsList"></ul>
+        </div>
+        <div>
+          <h3>Observed signals</h3>
+          <ul id="signalsList"></ul>
+        </div>
+        <div>
+          <h3>Policy controls</h3>
+          <ul id="controlsList"></ul>
+        </div>
+      </div>
+      <div class="assumptionBox">
+        <strong>Default modeling assumptions:</strong>
+        <ul id="assumptionsList"></ul>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Generate a figure</h2>
+
+      <label>Figure
+        <select id="figure"></select>
+      </label>
+
+      <div id="figureOverview" class="figureOverview"></div>
+
+      <div class="groupTitle">Journal load</div>
+      <div id="group_load" class="paramGroup"></div>
+
+      <div class="groupTitle">Review behavior</div>
+      <div id="group_review" class="paramGroup"></div>
+
+      <div class="groupTitle">Governance policy</div>
+      <div id="group_policy" class="paramGroup"></div>
+
+      <div class="groupTitle">Collusion / mitigation</div>
+      <div id="group_collusion" class="paramGroup"></div>
+
+      <div class="groupTitle">Long-term learning</div>
+      <div id="group_longterm" class="paramGroup"></div>
+
+      <button id="generateBtn">Generate</button>
+    </div>
+
+    <div class="panel">
+      <div id="status">Ready.</div>
+      <img id="figureImg" alt="Generated figure" />
+    </div>
+
+    <div class="panel">
+      <details>
+        <summary>Used config</summary>
+        <pre id="cfg"></pre>
+      </details>
+      <details>
+        <summary>Run log</summary>
+        <pre id="log"></pre>
+      </details>
+    </div>
+  </div>
+</body>
+</html>

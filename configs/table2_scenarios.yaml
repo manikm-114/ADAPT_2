@@ -1,0 +1,90 @@
+run:
+  seed: 123
+  out_dir: outputs/table2_runs
+
+sim:
+  T: 120
+
+submissions:
+  mean_per_timestep: 30
+  quality_mean: 0.60
+  quality_std: 0.15
+  complexity_mean: 0.50
+  complexity_std: 0.20
+
+reviewers:
+  n_humans: 200
+  n_ai: 30
+  max_load: 6
+
+review_process:
+  k_reviewers: 3
+  ai_fraction_target: 0.10
+
+triage:
+  threshold: 0.45
+
+capacity:
+  max_reviews_per_timestep: 180
+
+scenarios:
+
+  baseline:
+    label: "Baseline"
+    submission_multiplier: 1.0
+    noise_multiplier: 1.0
+    governance:
+      ai_min: 0.10
+      ai_max: 0.20
+      ai_step: 0.01
+      triage_step: 0.01
+      triage_max: 0.50
+      backlog_high: 40
+      backlog_low: 10
+      disagreement_high: 999
+      disagreement_low: 0
+
+  surge:
+    label: "Submission surge"
+    submission_multiplier: 2.0
+    noise_multiplier: 1.0
+    governance:
+      ai_min: 0.10
+      ai_max: 0.60
+      ai_step: 0.02
+      triage_step: 0.02
+      triage_max: 0.70
+      backlog_high: 40
+      backlog_low: 10
+      disagreement_high: 999
+      disagreement_low: 0
+
+  drift:
+    label: "Quality drift"
+    submission_multiplier: 1.0
+    noise_multiplier: 1.0
+    governance:
+      ai_min: 0.10
+      ai_max: 0.35
+      ai_step: 0.01
+      triage_step: 0.02
+      triage_max: 0.80
+      backlog_high: 40
+      backlog_low: 10
+      disagreement_high: 999
+      disagreement_low: 0
+
+  disagreement:
+    label: "Disagreement spike"
+    submission_multiplier: 1.0
+    noise_multiplier: 2.2
+    governance:
+      ai_min: 0.10
+      ai_max: 0.25
+      ai_step: 0.01
+      triage_step: 0.02
+      triage_max: 0.60
+      backlog_high: 40
+      backlog_low: 10
+      disagreement_high: 1.0
+      disagreement_low: 0.85

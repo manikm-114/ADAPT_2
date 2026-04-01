@@ -1,0 +1,23 @@
+﻿run:
+  seed: 123
+  out_dir: outputs/runs
+  run_name: fig7_postpub_credit
+
+sim:
+  T: 80
+
+authors:
+  high_quality_base_impact: 6.0
+  low_quality_base_impact: 2.0
+  impact_drift_per_t: 0.03
+  impact_noise_std: 0.25
+  expected_impact: 3.5
+  alpha: 0.08
+  initial_credit: 0.0
+
+reviewers:
+  insightful_alignment: 0.85
+  noisy_alignment: 0.35
+  noise_std: 0.08
+  alpha: 0.06
+  initial_credit: 0.0

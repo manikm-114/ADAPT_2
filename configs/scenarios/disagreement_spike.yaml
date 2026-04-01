@@ -1,0 +1,56 @@
+run:
+  seed: 123
+  out_dir: outputs/runs
+  run_name: disagreement_spike
+
+sim:
+  T: 30
+
+submissions:
+  mean_per_timestep: 30
+  quality_mean: 0.60
+  quality_std: 0.15
+  complexity_mean: 0.50
+  complexity_std: 0.20
+
+triage:
+  threshold: 0.45
+
+capacity:
+  max_reviews_per_timestep: 180
+
+reviewers:
+  n_humans: 200
+  n_ai: 30
+  max_load: 6
+  ai_enabled: true
+
+review_process:
+  k_reviewers: 3
+  ai_fraction_target: 0.10
+  escalation_enabled: true
+  escalation_max_rounds: 2
+  disagreement_threshold: 1.4
+  completeness_threshold: 0.55
+
+decision:
+  accept_threshold: 0.70
+  reject_threshold: 0.40
+  disagreement_guard: 1.4
+
+governance:
+  backlog_high: 25
+  backlog_low: 8
+  ai_min: 0.10
+  ai_max: 0.60
+  ai_step: 0.05
+  triage_step: 0.03
+  triage_max: 0.70
+  disagreement_high: 0.18     # lowered to match your disagreement scale (~0.05–0.12 baseline)
+  disagreement_low: 0.08
+
+scenario:
+  disagreement_spike:
+    start_t: 12
+    end_t: 22
+    noise_multiplier: 3.0

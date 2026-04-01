@@ -1,0 +1,44 @@
+﻿from __future__ import annotations
+
+import argparse
+from pathlib import Path
+from typing import Any, Dict
+
+import yaml
+
+from adapt.sim.engine import run_simulation
+
+
+def load_yaml(path: str) -> Dict[str, Any]:
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+def ensure_out_dir(cfg: Dict[str, Any]) -> Path:
+    run = cfg.get("run", {})
+    out_dir = run.get("out_dir", "outputs/runs")
+    run_name = run.get("run_name", Path(run.get("config", "run")).stem)
+    out_path = Path(out_dir) / run_name
+    out_path.mkdir(parents=True, exist_ok=True)
+    return out_path
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Run an ADAPT simulation scenario from a YAML config.")
+    ap.add_argument("--config", required=True, help="Path to scenario YAML config.")
+    args = ap.parse_args()
+
+    cfg = load_yaml(args.config)
+    # helpful for provenance
+    cfg.setdefault("run", {})
+    cfg["run"]["config"] = args.config
+
+    out_path = ensure_out_dir(cfg)
+    # Run the simulation (engine should write outputs to out_path based on cfg['run'])
+    run_simulation(cfg, out_path=out_path)
+
+    print(f"[OK] Finished. Outputs in: {out_path}")
+
+
+if __name__ == "__main__":
+    main()

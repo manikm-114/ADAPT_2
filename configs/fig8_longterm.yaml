@@ -1,0 +1,46 @@
+run:
+  seed: 123
+  out_dir: outputs/runs
+
+sim:
+  T: 120
+
+# exogenous post-publication signal (slow structural drift)
+postpub_signal:
+  base: 0.20
+  drift_per_t: 0.003      # slow increase
+  noise_std: 0.02
+  lag_alpha: 0.05        # EWMA lag (smaller = slower)
+
+# competing system objectives (synthetic)
+objectives:
+  quality_base: 0.60
+  quality_sensitivity: 0.40
+  trust_base: 0.65
+  trust_sensitivity: 0.35
+  lag_alpha: 0.04
+
+governance:
+  # slow steps (structural)
+  ai_step: 0.005
+  triage_step: 0.006
+  trust_baseline: 0.65          # reference point for erosion
+  trust_integrator_gain: 0.06   # how fast erosion accumulates
+  trust_integrator_cap: 6.0     # saturation of cumulative erosion
+
+
+  # saturation (logistic caps)
+  ai_min: 0.15
+  ai_max: 0.30
+  triage_min: 0.40
+  triage_max: 0.70
+
+  # nonlinear response (sigmoid slopes)
+  k_signal: 5.0
+  k_conflict: 4.0
+
+  # competing weights
+  w_quality: 0.6
+  w_trust: 0.4
+
+  inertia: 0.92   # high inertia = slow structural change
